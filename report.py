@@ -70,38 +70,51 @@ def gerar_relatorio(
     return destino
 
 
-# Status que entram na planilha de "pendências" (precisam de atenção/reprocesso)
+# Status "concluídos com sucesso" (a automação entrou / reiniciou o WorkFlow)
+STATUS_SUCESSO = (
+    StatusProcesso.WORKFLOW_REINICIADO,
+    StatusProcesso.ENTROU,
+)
+
+# Status que precisam de atenção (revisar / reprocessar) = tudo que NÃO foi
+# concluído com sucesso: sem compromisso, já concluído, múltiplos, não
+# encontrado, erro e pulado.
 STATUS_PENDENCIA = (
+    StatusProcesso.SEM_COMPROMISSO,
+    StatusProcesso.JA_CONCLUIDO,
+    StatusProcesso.MULTIPLOS,
     StatusProcesso.NAO_ENCONTRADO,
     StatusProcesso.ERRO,
     StatusProcesso.PULADO,
 )
 
 
-def gerar_planilha_pendencias(
+def _gerar_planilha_filtrada(
     resultados: Iterable[ResultadoProcesso],
     destino: Path,
+    status_alvo: tuple,
+    titulo_aba: str,
+    prefixo_arquivo: str,
 ) -> Path | None:
-    """Gera um .xlsx só com os processos que precisam de atenção:
-    NÃO ENCONTRADOS, ERRO e PULADOS — para revisão/reprocessamento fácil.
+    """Gera um .xlsx só com os resultados cujo status está em `status_alvo`.
 
-    A primeira coluna é o número do processo, então a planilha pode ser
-    reanexada diretamente para uma nova rodada. Retorna o caminho do
-    arquivo, ou None se não houver nenhum desses casos.
+    Colunas: Processo | Status | Mensagem (a 1ª coluna é o número, então a
+    planilha pode ser reanexada direto numa nova rodada). Retorna o caminho
+    do arquivo, ou None se não houver nenhum resultado nesses status.
     """
-    pendentes = [r for r in resultados if r.status in STATUS_PENDENCIA]
-    if not pendentes:
+    sel = [r for r in resultados if r.status in status_alvo]
+    if not sel:
         return None
 
     destino = Path(destino)
     if destino.is_dir() or destino.suffix == "":
         destino.mkdir(parents=True, exist_ok=True)
-        nome = f"iilex_pendencias_{datetime.now():%Y-%m-%d_%H%M%S}.xlsx"
+        nome = f"{prefixo_arquivo}_{datetime.now():%Y-%m-%d_%H%M%S}.xlsx"
         destino = destino / nome
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "Pendências"
+    ws.title = titulo_aba
 
     headers = ["Processo", "Status", "Mensagem"]
     for col, h in enumerate(headers, 1):
@@ -110,7 +123,7 @@ def gerar_planilha_pendencias(
         cel.font = CABECALHO_FONT
         cel.alignment = Alignment(horizontal="center", vertical="center")
 
-    for i, r in enumerate(pendentes, start=2):
+    for i, r in enumerate(sel, start=2):
         ws.cell(row=i, column=1, value=r.numero)
         ws.cell(row=i, column=2, value=r.status.value)
         ws.cell(row=i, column=3, value=r.mensagem)
@@ -119,12 +132,31 @@ def gerar_planilha_pendencias(
             for col in range(1, 4):
                 ws.cell(row=i, column=col).fill = fill
 
-    for col, w in enumerate([35, 22, 60], 1):
+    for col, w in enumerate([35, 24, 60], 1):
         ws.column_dimensions[get_column_letter(col)].width = w
     ws.freeze_panes = "A2"
 
     wb.save(destino)
     return destino
+
+
+def gerar_planilha_pendencias(
+    resultados: Iterable[ResultadoProcesso],
+    destino: Path,
+) -> Path | None:
+    """Planilha SÓ com os que precisam de atenção (revisar/reprocessar):
+    sem compromisso, já concluído, múltiplos, não encontrado, erro, pulado."""
+    return _gerar_planilha_filtrada(
+        resultados, destino, STATUS_PENDENCIA, "Revisar", "iilex_revisar")
+
+
+def gerar_planilha_sucesso(
+    resultados: Iterable[ResultadoProcesso],
+    destino: Path,
+) -> Path | None:
+    """Planilha SÓ com os concluídos com sucesso (entrou / WorkFlow reiniciado)."""
+    return _gerar_planilha_filtrada(
+        resultados, destino, STATUS_SUCESSO, "Concluídos", "iilex_concluidos")
 
 
 def _aba_resultados(wb: Workbook, resultados: list[ResultadoProcesso]):

@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM  Build do .exe do Exclusor de Workflow iiLex
+REM  Build do .exe do Reiniciador de Workflow iiLex
 REM  Uso: dois cliques OU "build.bat" no terminal
 REM ============================================================
 
@@ -22,9 +22,9 @@ echo === Gerando executavel ===
 py -m PyInstaller iilex.spec --clean
 
 echo.
-if exist "dist\iiLex Workflow Cleaner.exe" (
+if exist "dist\Reiniciador de Workflow iiLex.exe" (
     echo === Build concluido com sucesso! ===
-    echo Arquivo: dist\iiLex Workflow Cleaner.exe
+    echo Arquivo: dist\Reiniciador de Workflow iiLex.exe
 ) else (
     echo *** ERRO: build falhou ***
 )

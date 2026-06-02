@@ -1,6 +1,6 @@
 # Como gerar o executável (.exe)
 
-Esse guia mostra como empacotar a Automação iiLex num **`.exe` único**
+Esse guia mostra como empacotar o Reiniciador de Workflow iiLex num **`.exe` único**
 pra distribuir pros outros usuários do escritório sem precisar instalar
 Python.
 
@@ -29,7 +29,7 @@ py -m PyInstaller iilex.spec --clean
 ### 4. Pegue o executável
 O arquivo final fica em:
 ```
-dist/iiLex Workflow Cleaner.exe
+dist/Reiniciador de Workflow iiLex.exe
 ```
 
 Esse `.exe` é **autocontido** — basta copiar pra outra máquina Windows
@@ -41,7 +41,7 @@ e executar. ~80–100 MB.
 
 Copie pra um pendrive / rede compartilhada / OneDrive:
 ```
-iiLex Workflow Cleaner.exe
+Reiniciador de Workflow iiLex.exe
 ```
 
 O usuário só dá dois cliques. As configurações dele são salvas em:
@@ -72,7 +72,7 @@ rede do escritório bloquear, baixe manualmente:
 Falso positivo comum com PyInstaller. Adicione exceção:
 ```
 Configurações → Vírus e proteção → Gerenciar configurações →
-Adicionar ou remover exclusões → iiLex Workflow Cleaner.exe
+Adicionar ou remover exclusões → Reiniciador de Workflow iiLex.exe
 ```
 
 ### Executável muito grande (~150 MB)

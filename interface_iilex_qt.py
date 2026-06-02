@@ -1,5 +1,5 @@
 """
-Interface PyQt6 — Automação iiLex (Exclusor de WorkFlow).
+Interface PyQt6 — Reiniciador de Workflow iiLex (Ramos Advogados).
 
 Recursos:
     - Login com lembrar (DPAPI no Windows quando disponível)
@@ -33,6 +33,7 @@ import openpyxl
 from PyQt6.QtCore import (
     QObject,
     QSize,
+    QStringListModel,
     QThread,
     QTimer,
     Qt,
@@ -53,6 +54,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -82,13 +84,14 @@ from PyQt6.QtWidgets import (
 import checkpoint
 import credentials
 import report
-from config import Settings
+from config import Settings, TIPOS_COMPROMISSO
 from core_iilex import (
     CallbacksAutomacao,
     ConfigAutomacao,
     IilexAutomation,
     ResultadoProcesso,
     StatusProcesso,
+    normalizar_texto,
     validar_cnj,
 )
 
@@ -98,7 +101,7 @@ PASTA_BASE = Path(__file__).resolve().parent
 # ============================================================
 # VERSÃO / METADADOS
 # ============================================================
-VERSAO_APP = "1.0.0"
+VERSAO_APP = "1.2.0"
 ANO_APP = "2026"
 
 
@@ -122,34 +125,79 @@ def caminho_asset(nome: str) -> str:
 # ============================================================
 # LEITURA DE EXCEL
 # ============================================================
+def detectar_coluna_processo(ws) -> tuple[int | None, str | None]:
+    """Procura, no cabeçalho (linha 1), a coluna do 'Número do Processo'.
+
+    Retorna (índice 1-based, texto do cabeçalho) ou (None, None) se não houver
+    cabeçalho reconhecível. Serve pra auto-detectar a coluna certa em exports
+    da Agenda do iiLex, onde o nº do processo NÃO fica na coluna A (fica, por
+    ex., na coluna P = 'Número do Processo').
+    """
+    primeira = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+    if not primeira:
+        return None, None
+    # Match forte (cabeçalho normalizado == um destes)
+    exatos = {
+        "numero do processo", "n do processo", "no do processo",
+        "numero processo", "processo", "nº processo", "no processo",
+    }
+    fraco = None
+    for i, cel in enumerate(primeira, start=1):
+        if cel is None:
+            continue
+        h = normalizar_texto(str(cel))
+        if h in exatos:
+            return i, str(cel).strip()
+        # Match fraco: contém "processo" mas não é "Tipo de Compromisso" etc.
+        if fraco is None and "processo" in h and "tipo" not in h:
+            fraco = (i, str(cel).strip())
+    return fraco if fraco else (None, None)
+
+
 def ler_processos_excel(
     caminho: str,
     coluna: int = 1,
     aba: str = "",
     ignorar_duplicados: bool = True,
-) -> list[str]:
-    """Lê a coluna `coluna` (1-based) da aba especificada.
+) -> tuple[list[str], dict]:
+    """Lê os números de processo de uma planilha.
 
-    Ignora cabeçalhos comuns ('processo', 'numero', 'nº processo').
+    Estratégia:
+      1. AUTO-DETECTA a coluna pelo cabeçalho 'Número do Processo' / 'Processo'
+         (assim os exports da Agenda do iiLex funcionam direto, mesmo com o nº
+         do processo lá na coluna P).
+      2. Se não houver cabeçalho reconhecível, usa a `coluna` informada.
+
+    Pula cabeçalhos e qualquer célula SEM dígitos (rótulos como 'Número do
+    Processo'). Retorna (numeros, info), onde
+    info = {'coluna': int, 'cabecalho': str | None, 'auto': bool}.
     """
     wb = openpyxl.load_workbook(caminho, read_only=True, data_only=True)
     ws = wb[aba] if aba and aba in wb.sheetnames else wb.active
 
-    cabecalhos = {"processo", "nº processo", "numero", "número", "n°"}
+    col_auto, cab_auto = detectar_coluna_processo(ws)
+    col = col_auto if col_auto else coluna
+
+    cabecalhos = {"processo", "nº processo", "numero", "número", "n°",
+                  "numero do processo", "número do processo"}
     numeros: list[str] = []
     vistos: set[str] = set()
     for row in ws.iter_rows(values_only=True):
-        if not row or len(row) < coluna or row[coluna - 1] is None:
+        if not row or len(row) < col or row[col - 1] is None:
             continue
-        valor = str(row[coluna - 1]).strip()
+        valor = str(row[col - 1]).strip()
         if not valor or valor.lower() in cabecalhos:
+            continue
+        # Nº de processo SEMPRE tem dígito → pula rótulos/cabeçalhos de texto.
+        if not any(c.isdigit() for c in valor):
             continue
         if ignorar_duplicados and valor in vistos:
             continue
         vistos.add(valor)
         numeros.append(valor)
     wb.close()
-    return numeros
+    info = {"coluna": col, "cabecalho": cab_auto, "auto": bool(col_auto)}
+    return numeros, info
 
 
 # ============================================================
@@ -198,6 +246,7 @@ class Worker(QObject):
             pausa_entre_processos=self.params.settings.pausa_entre_processos,
             tipo_compromisso_alvo=self.params.settings.tipo_compromisso_alvo,
             excluir_workflow=self.params.settings.excluir_workflow,
+            relogin_minutos=self.params.settings.relogin_minutos,
         )
         callbacks = CallbacksAutomacao(
             on_log=lambda lvl, m: self.log_message.emit(lvl, m),
@@ -281,16 +330,6 @@ class DialogoConfiguracoes(QDialog):
         self.cb_tema.setCurrentIndex(idx)
         form.addRow("Tema:", self.cb_tema)
 
-        # Tipo de compromisso-alvo (match EXATO na Agenda)
-        self.ed_tipo_comp = QLineEdit(settings.tipo_compromisso_alvo)
-        self.ed_tipo_comp.setPlaceholderText("Ex.: Solicitação de Subsídios")
-        self.ed_tipo_comp.setToolTip(
-            "A automação entra no compromisso cujo 'Tipo de Compromisso' for "
-            "EXATAMENTE este texto (ignora acento/maiúscula).\n"
-            "Variações com sufixo NÃO entram — ex.: 'Solicitação de Subsídios - CEF'."
-        )
-        form.addRow("Tipo de compromisso:", self.ed_tipo_comp)
-
         self.sp_timeout = QSpinBox()
         self.sp_timeout.setRange(5, 120)
         self.sp_timeout.setValue(settings.timeout)
@@ -363,9 +402,6 @@ class DialogoConfiguracoes(QDialog):
     def settings_atualizadas(self) -> Settings:
         s = self.settings
         s.tema = self.cb_tema.currentData() or "escuro"
-        s.tipo_compromisso_alvo = (
-            self.ed_tipo_comp.text().strip() or s.tipo_compromisso_alvo
-        )
         s.timeout = self.sp_timeout.value()
         s.pausa_entre_processos = float(self.sp_pausa.value())
         s.coluna_excel = self.sp_coluna.value()
@@ -385,8 +421,8 @@ class DialogoConfiguracoes(QDialog):
 # QSS
 # ============================================================
 QSS_LIGHT = """
-/* Paleta de cores do projeto:
-   Navy:   #1F3559
+/* Paleta inspirada na marca Ramos Advogados:
+   Navy:   #1F3559 (escuro do logo)
    Bege:   #B8A589 (claro do logo)
    Bege2:  #C9B79D (acento)
 */
@@ -614,7 +650,7 @@ QSS_DARK = """
    Border:  #334155 (slate-700)
    Text:    #e2e8f0 (slate-200)
    Muted:   #94a3b8 (slate-400)
-   Navy:    #1F3559
+   Navy:    #1F3559 (mantido — marca Ramos)
    Bege:    #B8A589 (acento)
 */
 
@@ -898,7 +934,7 @@ class JanelaPrincipal(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Automação iiLex — Exclusor de WorkFlow")
+        self.setWindowTitle("Reiniciador de Workflow iiLex — Ramos Advogados")
         self.resize(780, 700)
         self.setMinimumSize(680, 560)
 
@@ -914,8 +950,9 @@ class JanelaPrincipal(QMainWindow):
         self.indice_corrente = 0  # último índice processado (para checkpoint)
         self.tray: QSystemTrayIcon | None = None
         self._file_log_handler: logging.FileHandler | None = None
-        self._path_relatorio: str | None = None   # relatório Excel completo
-        self._path_pendencias: str | None = None  # planilha de não encontrado/erro/pulado
+        self._path_relatorio: str | None = None   # relatório Excel completo (tudo)
+        self._path_sucesso: str | None = None     # planilha só dos concluídos
+        self._path_pendencias: str | None = None  # planilha dos que precisam revisar
 
         # UI
         self._criar_ui()
@@ -934,7 +971,7 @@ class JanelaPrincipal(QMainWindow):
     # ---------------------------------------------------------
     def _criar_ui(self):
         # Define o ícone da janela (taskbar + barra de título)
-        icon_path = caminho_asset("app.ico")
+        icon_path = caminho_asset("ramos.ico")
         if Path(icon_path).exists():
             self.setWindowIcon(QIcon(icon_path))
 
@@ -1005,6 +1042,10 @@ class JanelaPrincipal(QMainWindow):
         v_arq.addWidget(self.chk_excluir_wf)
         layout.addWidget(grp_arq)
 
+        # Tipo de compromisso-alvo (combo pesquisável) — na tela principal
+        # porque o usuário troca o tipo com frequência.
+        layout.addWidget(self._criar_grupo_compromisso())
+
         # Ações
         h_btn = QHBoxLayout()
         self.btn_iniciar = QPushButton("▶ Iniciar")
@@ -1024,10 +1065,17 @@ class JanelaPrincipal(QMainWindow):
         self.btn_relatorio.setToolTip("Abre o relatório Excel completo da execução")
         self.btn_relatorio.setVisible(False)
         self.btn_relatorio.clicked.connect(self._abrir_relatorio)
-        self.btn_pendencias = QPushButton("📋 Abrir pendências")
+        self.btn_sucesso = QPushButton("✅ Abrir concluídos")
+        self.btn_sucesso.setObjectName("preview")
+        self.btn_sucesso.setToolTip(
+            "Planilha só dos concluídos com sucesso (entrou / WorkFlow reiniciado)")
+        self.btn_sucesso.setVisible(False)
+        self.btn_sucesso.clicked.connect(self._abrir_sucesso)
+        self.btn_pendencias = QPushButton("📋 Abrir revisar")
         self.btn_pendencias.setObjectName("preview")
         self.btn_pendencias.setToolTip(
-            "Planilha dos processos não encontrados, com erro ou pulados")
+            "Planilha dos que precisam revisar: sem compromisso, já concluído, "
+            "múltiplos, não encontrado, erro ou pulado")
         self.btn_pendencias.setVisible(False)
         self.btn_pendencias.clicked.connect(self._abrir_pendencias)
         self.btn_limpar = QPushButton("🗑 Limpar logs")
@@ -1037,6 +1085,7 @@ class JanelaPrincipal(QMainWindow):
         h_btn.addWidget(self.btn_parar)
         h_btn.addStretch()
         h_btn.addWidget(self.btn_relatorio)
+        h_btn.addWidget(self.btn_sucesso)
         h_btn.addWidget(self.btn_pendencias)
         h_btn.addWidget(self.btn_limpar)
         layout.addLayout(h_btn)
@@ -1071,6 +1120,78 @@ class JanelaPrincipal(QMainWindow):
         self.status_bar.showMessage("Pronto.")
 
     # ---------------------------------------------------------
+    # TIPO DE COMPROMISSO (combo pesquisável da tela principal)
+    # ---------------------------------------------------------
+    def _criar_grupo_compromisso(self) -> QGroupBox:
+        """Grupo da tela principal com o seletor de Tipo de Compromisso.
+
+        Combo EDITÁVEL + pesquisável (ignora acento e maiúscula/minúscula).
+        O valor escolhido é o compromisso-alvo que a automação procura na
+        Agenda. Ficava nas Configurações; foi movido pra cá porque o usuário
+        troca o tipo com frequência.
+        """
+        grp = QGroupBox("Tipo de Compromisso")
+        v = QVBoxLayout(grp)
+
+        self.cb_tipo_comp = QComboBox()
+        self.cb_tipo_comp.setEditable(True)
+        self.cb_tipo_comp.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.cb_tipo_comp.addItems(TIPOS_COMPROMISSO)
+
+        # Busca "contém" ignorando ACENTO e caixa (o QCompleter puro não faz).
+        # Por isso: UnfilteredPopupCompletion + filtro à mão num QStringListModel.
+        self._tipos_model = QStringListModel(list(TIPOS_COMPROMISSO), self)
+        completer = QCompleter(self._tipos_model, self.cb_tipo_comp)
+        completer.setCompletionMode(
+            QCompleter.CompletionMode.UnfilteredPopupCompletion
+        )
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.cb_tipo_comp.setCompleter(completer)
+        self._tipos_completer = completer
+        self.cb_tipo_comp.lineEdit().textEdited.connect(self._filtrar_tipos)
+
+        # Pré-seleciona o valor salvo (casando por texto normalizado).
+        self._selecionar_tipo(self.settings.tipo_compromisso_alvo)
+
+        self.cb_tipo_comp.lineEdit().setPlaceholderText(
+            "Digite para buscar…  ex.: Subsídios")
+        self.cb_tipo_comp.setToolTip(
+            "A automação ENTRA no compromisso cujo 'Tipo de Compromisso' na "
+            "Agenda for EXATAMENTE este (ignora acento/maiúscula).\n"
+            "Escolha da lista ou digite para buscar/usar um tipo novo.\n"
+            "Variações com sufixo NÃO entram — ex.: 'SOLICITAÇÃO DE SUBSÍDIOS - CEF'."
+        )
+        v.addWidget(self.cb_tipo_comp)
+        return grp
+
+    def _selecionar_tipo(self, valor: str):
+        """Pré-seleciona `valor` no combo casando por texto normalizado
+        (acento/caixa). Assim 'Solicitação de Subsídios' acha
+        'SOLICITAÇÃO DE SUBSIDIOS'. Se não existir, usa como texto livre."""
+        idx = self.cb_tipo_comp.findText(valor, Qt.MatchFlag.MatchFixedString)
+        if idx < 0:
+            alvo = normalizar_texto(valor)
+            for i, t in enumerate(TIPOS_COMPROMISSO):
+                if normalizar_texto(t) == alvo:
+                    idx = i
+                    break
+        if idx >= 0:
+            self.cb_tipo_comp.setCurrentIndex(idx)
+        else:
+            self.cb_tipo_comp.setCurrentText(valor)
+
+    def _filtrar_tipos(self, texto: str):
+        """Filtra o popup do combo ignorando ACENTO e maiúscula/minúscula.
+        Texto vazio = lista completa de volta."""
+        alvo = normalizar_texto(texto)
+        if alvo:
+            filtrados = [t for t in TIPOS_COMPROMISSO if alvo in normalizar_texto(t)]
+        else:
+            filtrados = list(TIPOS_COMPROMISSO)
+        self._tipos_model.setStringList(filtrados)
+        self._tipos_completer.complete()
+
+    # ---------------------------------------------------------
     # HEADER
     # ---------------------------------------------------------
     def _build_header(self) -> QFrame:
@@ -1087,7 +1208,7 @@ class JanelaPrincipal(QMainWindow):
         # Logo (R com barras) — tamanho compacto pro header
         logo_label = QLabel()
         logo_label.setObjectName("headerLogo")
-        logo_pix = QPixmap(caminho_asset("logo.png"))
+        logo_pix = QPixmap(caminho_asset("R_logo.png"))
         if not logo_pix.isNull():
             logo_pix = logo_pix.scaledToHeight(
                 50, Qt.TransformationMode.SmoothTransformation
@@ -1113,9 +1234,9 @@ class JanelaPrincipal(QMainWindow):
         titulos.setContentsMargins(0, 0, 0, 0)
         titulos.setSpacing(2)
         titulos.addStretch()
-        titulo = QLabel("Automação iiLex")
+        titulo = QLabel("Reiniciador de Workflow iiLex")
         titulo.setObjectName("tituloHeader")
-        subtitulo = QLabel("Exclusor de Workflows iiLex")
+        subtitulo = QLabel("Ramos Advogados")
         subtitulo.setObjectName("subtituloHeader")
         titulos.addWidget(titulo)
         titulos.addWidget(subtitulo)
@@ -1148,7 +1269,7 @@ class JanelaPrincipal(QMainWindow):
         # Logo R pequena
         logo_label = QLabel()
         logo_label.setObjectName("footerLogo")
-        logo_pix = QPixmap(caminho_asset("logo.png"))
+        logo_pix = QPixmap(caminho_asset("R_logo.png"))
         if not logo_pix.isNull():
             logo_pix = logo_pix.scaledToHeight(
                 32, Qt.TransformationMode.SmoothTransformation
@@ -1162,7 +1283,7 @@ class JanelaPrincipal(QMainWindow):
         empresa_box = QVBoxLayout()
         empresa_box.setContentsMargins(0, 0, 0, 0)
         empresa_box.setSpacing(0)
-        empresa = QLabel("Automação iiLex")
+        empresa = QLabel("Ramos Advogados")
         empresa.setObjectName("footerEmpresa")
         tagline = QLabel("Tecnologia jurídica")
         tagline.setObjectName("footerCreditos")
@@ -1177,7 +1298,7 @@ class JanelaPrincipal(QMainWindow):
         versao_box.setContentsMargins(0, 0, 0, 0)
         versao_box.setSpacing(0)
         versao_box.setAlignment(Qt.AlignmentFlag.AlignRight)
-        nome_app = QLabel("Exclusor de Workflows iiLex")
+        nome_app = QLabel("Reiniciador de Workflow iiLex")
         nome_app.setObjectName("footerEmpresa")
         nome_app.setAlignment(Qt.AlignmentFlag.AlignRight)
         versao_txt = QLabel(f"v{VERSAO_APP}  •  © {ANO_APP}")
@@ -1192,13 +1313,13 @@ class JanelaPrincipal(QMainWindow):
     def _criar_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        icon_path = caminho_asset("app.ico")
+        icon_path = caminho_asset("ramos.ico")
         if Path(icon_path).exists():
             icon = QIcon(icon_path)
         else:
             icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         self.tray = QSystemTrayIcon(icon, self)
-        self.tray.setToolTip("Automação iiLex")
+        self.tray.setToolTip("Reiniciador de Workflow iiLex")
         self.tray.show()
 
     # ---------------------------------------------------------
@@ -1214,7 +1335,7 @@ class JanelaPrincipal(QMainWindow):
         if not caminho:
             return
         try:
-            numeros = ler_processos_excel(
+            numeros, info = ler_processos_excel(
                 caminho,
                 coluna=self.settings.coluna_excel,
                 aba=self.settings.aba_excel,
@@ -1231,6 +1352,21 @@ class JanelaPrincipal(QMainWindow):
         self.lbl_arquivo.style().unpolish(self.lbl_arquivo)
         self.lbl_arquivo.style().polish(self.lbl_arquivo)
         self.btn_preview.setEnabled(True)
+
+        # Transparência: qual coluna foi usada (auto-detecção pelo cabeçalho).
+        from openpyxl.utils import get_column_letter
+        letra = get_column_letter(info["coluna"])
+        if info["auto"]:
+            self._log("INFO",
+                f'Coluna {letra} detectada pelo cabeçalho "{info["cabecalho"]}" '
+                f"— {len(numeros)} processo(s) carregado(s).")
+        else:
+            self._log("INFO",
+                f"Lendo coluna {letra} — {len(numeros)} processo(s) carregado(s).")
+        if not numeros:
+            self._log("WARNING",
+                "Nenhum número de processo encontrado. Confira se a planilha "
+                "tem uma coluna 'Número do Processo'.")
 
         if self.settings.validar_cnj:
             invalidos = [n for n in numeros if not validar_cnj(n)]
@@ -1254,14 +1390,23 @@ class JanelaPrincipal(QMainWindow):
                 self, "Sem relatório",
                 "Nenhum relatório disponível ainda.")
 
+    def _abrir_sucesso(self):
+        """Abre a planilha só dos concluídos com sucesso."""
+        if self._path_sucesso and Path(self._path_sucesso).exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._path_sucesso))
+        else:
+            QMessageBox.information(
+                self, "Sem concluídos",
+                "Nenhuma planilha de concluídos disponível.")
+
     def _abrir_pendencias(self):
-        """Abre a planilha de pendências (não encontrado / erro / pulado)."""
+        """Abre a planilha dos que precisam revisar."""
         if self._path_pendencias and Path(self._path_pendencias).exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._path_pendencias))
         else:
             QMessageBox.information(
                 self, "Sem pendências",
-                "Nenhuma planilha de pendências disponível.")
+                "Nenhuma planilha de revisão disponível.")
 
     # ---------------------------------------------------------
     # Configurações
@@ -1309,9 +1454,14 @@ class JanelaPrincipal(QMainWindow):
         else:
             credentials.apagar()
 
-        # Aplica headless escolhido na UI
+        # Aplica opções escolhidas na UI principal
         self.settings.headless = self.chk_headless.isChecked()
         self.settings.excluir_workflow = self.chk_excluir_wf.isChecked()
+        self.settings.tipo_compromisso_alvo = (
+            self.cb_tipo_comp.currentText().strip()
+            or self.settings.tipo_compromisso_alvo
+        )
+        self.settings.salvar()  # persiste o tipo escolhido p/ a próxima vez
 
         # Filtra inválidos se configurado
         processos = self.processos_carregados
@@ -1352,6 +1502,8 @@ class JanelaPrincipal(QMainWindow):
         self.indice_corrente = retomar_de
         self._path_relatorio = None
         self.btn_relatorio.setVisible(False)
+        self._path_sucesso = None
+        self.btn_sucesso.setVisible(False)
         self._path_pendencias = None
         self.btn_pendencias.setVisible(False)
         self.lbl_contadores.setText(self._formatar_contadores())
@@ -1436,7 +1588,18 @@ class JanelaPrincipal(QMainWindow):
                 self._log("OK", f"Relatório gerado: {path_relat}")
             except Exception as e:
                 self._log("ERROR", f"Falha ao gerar relatório: {e}")
-            # Planilha separada das pendências (não encontrado / erro / pulado)
+            # Planilha só dos CONCLUÍDOS com sucesso (entrou / WF reiniciado)
+            try:
+                path_ok = report.gerar_planilha_sucesso(resultados, pasta)
+                if path_ok:
+                    self._path_sucesso = str(path_ok)
+                    self.btn_sucesso.setVisible(True)
+                    self.btn_sucesso.setEnabled(True)
+                    self._log("OK", f"Planilha de concluídos gerada: {path_ok}")
+            except Exception as e:
+                self._log("ERROR", f"Falha ao gerar planilha de concluídos: {e}")
+            # Planilha separada dos que precisam REVISAR (sem compromisso, já
+            # concluído, múltiplos, não encontrado, erro, pulado)
             try:
                 path_pend = report.gerar_planilha_pendencias(resultados, pasta)
                 if path_pend:
@@ -1444,9 +1607,9 @@ class JanelaPrincipal(QMainWindow):
                     self.btn_pendencias.setVisible(True)
                     self.btn_pendencias.setEnabled(True)
                     self._log("WARNING",
-                              f"Planilha de pendências gerada: {path_pend}")
+                              f"Planilha de revisão gerada: {path_pend}")
             except Exception as e:
-                self._log("ERROR", f"Falha ao gerar planilha de pendências: {e}")
+                self._log("ERROR", f"Falha ao gerar planilha de revisão: {e}")
 
         # Checkpoint: se concluiu tudo, apaga; senão, salva onde parou
         total = len(self.processos_carregados)
@@ -1467,7 +1630,7 @@ class JanelaPrincipal(QMainWindow):
         if self.settings.notificar_ao_terminar and self.tray:
             resumo = self._resumo_contagem()
             self.tray.showMessage(
-                "Automação iiLex concluída",
+                "Reiniciador de Workflow iiLex concluído",
                 f"{resumo}" + (f"\nRelatório: {Path(path_relat).name}" if path_relat else ""),
                 QSystemTrayIcon.MessageIcon.Information,
                 5000,
@@ -1635,11 +1798,11 @@ class JanelaPrincipal(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
-    app.setApplicationName("Automação iiLex")
-    app.setOrganizationName("iiLex Automation")
+    app.setApplicationName("Reiniciador de Workflow iiLex")
+    app.setOrganizationName("Ramos Advogados")
 
     # Ícone da aplicação (aparece também na taskbar do Windows)
-    icon_path = caminho_asset("app.ico")
+    icon_path = caminho_asset("ramos.ico")
     if Path(icon_path).exists():
         app.setWindowIcon(QIcon(icon_path))
 

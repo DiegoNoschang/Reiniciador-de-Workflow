@@ -7,7 +7,7 @@ base64 (= ofuscação, NÃO criptografia) e avisa.
 
 Formato do arquivo:
     {
-        "usuario": "seu.usuario",
+        "usuario": "caio.romeira",
         "senha_protegida": "<bytes em base64>",
         "modo": "dpapi" | "base64"
     }

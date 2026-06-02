@@ -47,8 +47,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 # ============================================================
 # CONSTANTES — seletores e URLs
 # ============================================================
-URL_LOGIN_DEFAULT = "https://SEU-DOMINIO.iilex.com.br/sistema/login/semacesso"
-URL_CONTENCIOSO_DEFAULT = "https://SEU-DOMINIO.iilex.com.br/sistema/contencioso/filtro"
+URL_LOGIN_DEFAULT = "https://ramosadv.iilex.com.br/sistema/login/semacesso"
+URL_CONTENCIOSO_DEFAULT = "https://ramosadv.iilex.com.br/sistema/contencioso/filtro"
 
 SEL_LOGIN = (By.ID, "texto1")
 SEL_SENHA = (By.ID, "texto2")
@@ -173,6 +173,9 @@ class ConfigAutomacao:
     # (= não finalizado) e NUNCA usa o 'Excluir' vermelho (que apaga o
     # compromisso inteiro).
     excluir_workflow: bool = True
+    # Re-login PROATIVO: reloga a cada N minutos para a sessão não expirar no
+    # meio de execuções longas (0 = desliga o re-login por tempo).
+    relogin_minutos: int = 30
 
 
 @dataclass
@@ -278,7 +281,14 @@ class IilexAutomation:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         service = Service(ChromeDriverManager().install())
-        return webdriver.Chrome(service=service, options=options)
+        driver = webdriver.Chrome(service=service, options=options)
+        # Falha em ~60s se uma página travar (ex.: site fora do ar), em vez de
+        # ficar pendurado no padrão (~300s) do Chrome.
+        try:
+            driver.set_page_load_timeout(max(self.config.timeout, 60))
+        except WebDriverException:
+            pass
+        return driver
 
     # ---------- pausa cooperativa ----------
     def _esperar_pausa(self):
@@ -321,6 +331,8 @@ class IilexAutomation:
                 (útil para checkpoint/retomar)
         """
         self.resultados = []
+        self._usuario, self._senha = usuario, senha  # guardado p/ re-login automático
+        self._ultimo_login = 0.0  # horário do último login (re-login proativo)
         try:
             self.cb.on_status("Iniciando navegador...")
             self._info("Iniciando automação%s...",
@@ -346,6 +358,7 @@ class IilexAutomation:
                     self._warn("Parado pelo usuário.")
                     return self.resultados
                 self._esperar_pausa()
+                self._manter_sessao()  # re-login proativo a cada N min
 
                 numero = processos[i]
                 self.cb.on_status(f"Processando {i + 1}/{total}: {numero}")
@@ -438,6 +451,7 @@ class IilexAutomation:
                 return False
 
             self._ok("Login bem-sucedido!")
+            self._ultimo_login = time.time()  # marca p/ o re-login proativo
             return True
         except TimeoutException:
             self._err("Timeout no login.")
@@ -454,8 +468,13 @@ class IilexAutomation:
 
     # ---------- detectar sessão expirada ----------
     def _sessao_expirou(self) -> bool:
+        """True se fomos jogados de volta pra tela de login (sessão expirada)."""
         try:
-            return "semacesso" in self.driver.current_url.lower()
+            url = (self.driver.current_url or "").lower()
+            if "semacesso" in url or "/login" in url:
+                return True
+            # Fallback: campo de senha presente onde não deveria = caiu no login.
+            return bool(self.driver.find_elements(*SEL_SENHA))
         except WebDriverException:
             return False
 
@@ -468,13 +487,92 @@ class IilexAutomation:
         self._esperar_documento_pronto()
         return True
 
+    def _manter_sessao(self):
+        """Re-login PROATIVO por tempo: se já passou `relogin_minutos` desde o
+        último login, reloga ANTES de continuar — evita a sessão do iiLex
+        expirar no meio de execuções longas. `relogin_minutos = 0` desliga.
+        """
+        minutos = getattr(self.config, "relogin_minutos", 30)
+        if not minutos or minutos <= 0:
+            return
+        if not self._ultimo_login:
+            return
+        if (time.time() - self._ultimo_login) < minutos * 60:
+            return
+        self._info("Já se passaram ~%d min desde o login — relogando "
+                   "preventivamente...", minutos)
+        # Marca a tentativa AGORA (evita repetir a cada processo se falhar);
+        # se o _login der certo, ele atualiza _ultimo_login de novo.
+        self._ultimo_login = time.time()
+        self._tentar_religar(self._usuario, self._senha)
+
+    # ---------- resiliência: site fora do ar ----------
+    def _site_respondeu(self) -> bool:
+        """True se carregou uma página reconhecível do iiLex — a de pesquisa
+        (Contencioso) OU a de login. Se não há NENHUM dos dois, o site
+        provavelmente está fora do ar / mostrando página de erro.
+        """
+        try:
+            return bool(
+                self.driver.find_elements(*SEL_CAMPO_PROCESSO)
+                or self.driver.find_elements(*SEL_LOGIN)
+                or self.driver.find_elements(*SEL_SENHA)
+            )
+        except WebDriverException:
+            return False
+
+    def _abrir_contencioso_resiliente(self) -> bool:
+        """Abre a tela de Contencioso. Se o iiLex estiver FORA DO AR, FICA
+        TENTANDO (com espera crescente) até o site voltar. Cooperativo: para
+        se o usuário clicar em Parar. Retorna True quando o site respondeu,
+        ou False se o usuário parou.
+        """
+        espera = 15
+        avisou = False
+        while not self.cb.is_stop_requested():
+            try:
+                self.driver.get(self.config.url_contencioso)
+                self._esperar_loading()
+                if self._site_respondeu():
+                    if avisou:
+                        self._ok("iiLex voltou ao ar — retomando.")
+                    return True
+            except WebDriverException as e:
+                self._warn("iiLex não respondeu (%s).",
+                           getattr(e, "msg", "") or type(e).__name__)
+            avisou = True
+            self.cb.on_status("Site do iiLex fora do ar — aguardando voltar...")
+            self._warn("Site do iiLex parece fora do ar — aguardando %ds e "
+                       "tentando de novo (deixe rodando, ele retoma sozinho).",
+                       espera)
+            self._sleep_cooperativo(espera)
+            espera = min(espera + 15, 120)  # espera crescente, até 2 min
+        return False
+
     # ---------- processar um único processo ----------
-    def _processar_um(self, numero: str) -> ResultadoProcesso:
+    def _processar_um(self, numero: str, _ja_religou: bool = False) -> ResultadoProcesso:
         wait = WebDriverWait(self.driver, self.config.timeout)
         try:
             self._info("Abrindo tela de Contencioso...")
-            self.driver.get(self.config.url_contencioso)
-            self._esperar_loading()
+            # Se o site estiver fora do ar, espera ele voltar (fica tentando).
+            if not self._abrir_contencioso_resiliente():
+                return ResultadoProcesso(numero, StatusProcesso.PULADO,
+                                         "Parado pelo usuário")
+
+            # A sessão do iiLex expira após um tempo logado. Se ao abrir o
+            # Contencioso caímos no login, religa automaticamente e tenta de novo.
+            if self._sessao_expirou():
+                if _ja_religou:
+                    msg = "Sessão expirou e o re-login não resolveu"
+                    self._err("%s [%s].", msg, numero)
+                    return ResultadoProcesso(numero, StatusProcesso.ERRO, msg)
+                self._warn("Sessão expirada detectada antes de %s — religando...",
+                           numero)
+                if self._tentar_religar(self._usuario, self._senha):
+                    return self._processar_um(numero, _ja_religou=True)
+                return ResultadoProcesso(
+                    numero, StatusProcesso.ERRO,
+                    "Sessão expirou e não foi possível religar")
 
             campo_proc = wait.until(
                 EC.presence_of_element_located(SEL_CAMPO_PROCESSO)
@@ -509,7 +607,25 @@ class IilexAutomation:
 
             return self._processar_agenda(numero)
         except WebDriverException as e:
-            msg = getattr(e, "msg", str(e))
+            # Pode ter sido sessão expirada bem no meio do processo: religa 1x.
+            if not _ja_religou and self._sessao_expirou():
+                if self._tentar_religar(self._usuario, self._senha):
+                    return self._processar_um(numero, _ja_religou=True)
+            # Site caiu no meio do processo? Espera ele voltar (pra não queimar
+            # os próximos como erro) e marca ESTE p/ reprocessar depois.
+            if not self._site_respondeu():
+                self._warn("Site do iiLex caiu durante %s — aguardando voltar...",
+                           numero)
+                self._abrir_contencioso_resiliente()
+                return ResultadoProcesso(
+                    numero, StatusProcesso.ERRO,
+                    "Site caiu durante o processamento (reprocessar depois)")
+            # Mensagem NUNCA vazia (TimeoutException vem sem msg) + URL p/ diagnóstico.
+            msg = getattr(e, "msg", "") or str(e) or type(e).__name__
+            try:
+                msg = f"{msg} [URL: {self.driver.current_url}]"
+            except Exception:
+                pass
             self._err("Erro processando %s: %s", numero, msg)
             return ResultadoProcesso(numero, StatusProcesso.ERRO, msg)
         except Exception as e:
@@ -765,15 +881,19 @@ class IilexAutomation:
         self._esperar_loading()
 
     def _esperar_tabela_agenda_pronta(self):
-        """Espera o <tbody> da tabela da Agenda popular (AJAX) e a retorna.
+        """Espera a tabela da Agenda popular (AJAX) e a retorna.
 
-        O conteúdo chega de forma assíncrona após expandir. Espera até
-        haver ao menos uma linha com <td> OU até o timeout. Se o cabeçalho
-        'Agenda ( N )' indicar 0 itens, devolve a tabela assim que ela
-        ficar visível (sem esperar linhas que nunca virão).
+        O conteúdo chega de forma assíncrona após expandir. Se o cabeçalho
+        'Agenda ( N )' indicar 0 itens, devolve a tabela assim que ela ficar
+        visível (sem esperar linhas que nunca virão). Quando há itens
+        esperados, espera com MAIS paciência: em processos grandes (ex.:
+        federais) o submódulo data-async pode passar dos 20s.
         """
         qtd = self._qtd_agenda()
-        fim = time.time() + self.config.timeout
+        # Agenda vazia → espera curta; agenda COM itens (ou qtd desconhecida)
+        # → espera generosa (no mínimo 45s), pois o AJAX federal é mais lento.
+        espera = self.config.timeout if qtd == 0 else max(self.config.timeout, 45)
+        fim = time.time() + espera
         tabela = None
         while time.time() < fim:
             tabela = self._tabela_agenda_visivel()
@@ -781,11 +901,25 @@ class IilexAutomation:
                 if qtd == 0:
                     return tabela
                 try:
-                    if tabela.find_elements(By.XPATH, ".//tbody//tr[td]"):
+                    # ".//tr[td]" (não só dentro de <tbody>): há layouts que
+                    # renderizam as linhas fora do <tbody>.
+                    if tabela.find_elements(By.XPATH, ".//tr[td]"):
                         return tabela
                 except WebDriverException:
                     pass
             time.sleep(0.4)
+        # Último recurso: tabela presente no DOM COM linhas de dados, mesmo que
+        # o Selenium a julgue "não visível" (alguns layouts confundem o
+        # is_displayed). Só aceita se TIVER linhas (evita pegar template vazio).
+        if tabela is None:
+            try:
+                for e in self.driver.find_elements(*SEL_TABELA_AGENDA):
+                    if e.find_elements(By.XPATH, ".//tr[td]"):
+                        self._warn("Agenda lida via fallback (tabela no DOM, "
+                                   "porém marcada como não-visível).")
+                        return e
+            except WebDriverException:
+                pass
         return tabela  # última tentativa (pode estar vazia)
 
     def _tabela_agenda_visivel(self):
@@ -984,17 +1118,38 @@ class IilexAutomation:
             return False
 
         self._esperar_loading()
-        time.sleep(1)
-        if self._workflow_sumiu():
+        # Confirma a remoção esperando um sinal CLARO (até o timeout): o botão
+        # 'Iniciar Workflow' surgir (só aparece com o fluxo vazio) OU a box do
+        # fluxo sumir. Evita o falso "não consegui verificar" quando, na prática,
+        # a exclusão deu certo — só demorou um instante a refletir na tela.
+        if self._esperar_workflow_removido():
             self._ok("WorkFlow excluído do processo %s.", numero)
         else:
             self._warn("Confirmou a exclusão, mas não consegui verificar a "
                        "remoção do WorkFlow [%s].", numero)
         return True  # a confirmação foi clicada — tratamos como excluído
 
+    def _esperar_workflow_removido(self) -> bool:
+        """Espera (até ~timeout) um sinal CLARO de que o WorkFlow foi removido,
+        checando periodicamente. Retorna True assim que detectar; False só se
+        estourar o tempo (aí sim é um caso pra olhar)."""
+        fim = time.time() + self.config.timeout
+        while time.time() < fim:
+            if self._workflow_sumiu():
+                return True
+            time.sleep(0.4)
+        return False
+
     def _workflow_sumiu(self) -> bool:
-        """Heurística pós-exclusão: a 'box' do fluxo (worflow-box) deve sumir."""
+        """Sinais de que o WorkFlow foi removido (qualquer um já basta):
+          1. surgiu o botão 'Iniciar Workflow' (só aparece com o fluxo VAZIO); OU
+          2. a 'box' do fluxo (worflow-box) não está mais visível.
+        """
         try:
+            # Sinal forte e confiável: o botão de iniciar só aparece quando o
+            # fluxo zera — ou seja, a exclusão funcionou.
+            if self.driver.find_elements(*SEL_BTN_INICIAR_WORKFLOW):
+                return True
             boxes = self.driver.find_elements(
                 By.XPATH,
                 "//*[contains(@class,'worflow-box') "

@@ -1,13 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec — gera um .exe único do Exclusor de Workflow iiLex.
+PyInstaller spec — gera um .exe único do Reiniciador de Workflow iiLex.
 
 Como usar:
     pip install pyinstaller
     pyinstaller iilex.spec
 
 O executável final fica em:
-    dist/iiLex Workflow Cleaner.exe
+    dist/Reiniciador de Workflow iiLex.exe
 """
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -37,6 +37,9 @@ hidden_imports = [
 # ============================================================
 extra_datas = [
     # Logos e ícones (header, footer, window icon)
+    ('assets/ramos.ico', 'assets'),
+    ('assets/R_logo.png', 'assets'),
+    ('assets/logo_ramos.png', 'assets'),
 ]
 
 # selenium e webdriver_manager têm arquivos auxiliares (templates,
@@ -84,7 +87,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='iiLex Workflow Cleaner',
+    name='Reiniciador de Workflow iiLex',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -96,5 +99,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon='assets/app.ico',  # opcional: adicione seu ícone em assets/
+    icon='assets/ramos.ico',  # ícone do .exe (aparece no Explorer)
 )
