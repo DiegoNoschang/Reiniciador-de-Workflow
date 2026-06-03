@@ -32,6 +32,10 @@ class Checkpoint:
     proximo_indice: int = 0            # próximo a processar (0-based)
     salvo_em: str = ""                 # timestamp ISO
     processados: list[str] = field(default_factory=list)  # nºs já processados (audit)
+    # Resultados acumulados (lista de dicts: numero/status/mensagem/timestamp).
+    # Permite RESTAURAR contadores e relatório ao retomar — sem zerar os números
+    # nem perder os que deram erro.
+    resultados: list = field(default_factory=list)
 
 
 def calcular_hash(processos: list[str]) -> str:

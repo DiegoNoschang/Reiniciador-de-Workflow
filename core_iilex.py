@@ -47,8 +47,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 # ============================================================
 # CONSTANTES — seletores e URLs
 # ============================================================
-URL_LOGIN_DEFAULT = "https://ramosadv.iilex.com.br/sistema/login/semacesso"
-URL_CONTENCIOSO_DEFAULT = "https://ramosadv.iilex.com.br/sistema/contencioso/filtro"
+URL_LOGIN_DEFAULT = "https://SEU-ESCRITORIO.iilex.com.br/sistema/login/semacesso"
+URL_CONTENCIOSO_DEFAULT = "https://SEU-ESCRITORIO.iilex.com.br/sistema/contencioso/filtro"
 
 SEL_LOGIN = (By.ID, "texto1")
 SEL_SENHA = (By.ID, "texto2")
@@ -176,6 +176,9 @@ class ConfigAutomacao:
     # Re-login PROATIVO: reloga a cada N minutos para a sessão não expirar no
     # meio de execuções longas (0 = desliga o re-login por tempo).
     relogin_minutos: int = 30
+    # Re-tentativas quando um processo dá ERRO (ex.: a Agenda não carregou a
+    # tempo). Re-navega do zero — geralmente a 2ª tentativa funciona. 0 = off.
+    max_retentativas_erro: int = 2
 
 
 @dataclass
@@ -365,6 +368,25 @@ class IilexAutomation:
                 self._info("[%d/%d] Processando: %s", i + 1, total, numero)
 
                 resultado = self._processar_um(numero)
+                # Erros costumam ser TRANSITÓRIOS (a Agenda não carregou a
+                # tempo etc.). Re-tenta o processo do zero algumas vezes —
+                # geralmente na 2ª tentativa funciona.
+                rt = 0
+                while (resultado.status == StatusProcesso.ERRO
+                       and rt < max(0, self.config.max_retentativas_erro)
+                       and not self.cb.is_stop_requested()):
+                    rt += 1
+                    self._warn("Erro em %s (%s) — tentando de novo (%d/%d)...",
+                               numero, resultado.mensagem, rt,
+                               self.config.max_retentativas_erro)
+                    self._sleep_cooperativo(3)
+                    self._esperar_pausa()
+                    if self.cb.is_stop_requested():
+                        break
+                    resultado = self._processar_um(numero)
+                if rt and resultado.status != StatusProcesso.ERRO:
+                    self._ok("%s recuperado na tentativa %d.", numero, rt + 1)
+
                 self.resultados.append(resultado)
                 self.cb.on_resultado(resultado)
                 self.cb.on_progress(i + 1, total)
@@ -604,6 +626,7 @@ class IilexAutomation:
                 self._warn("%s [%s].", erro_sel, numero)
                 return ResultadoProcesso(numero, StatusProcesso.NAO_ENCONTRADO, erro_sel)
             self._esperar_loading()
+            self._esperar_documento_pronto()  # garante a página do processo carregada
 
             return self._processar_agenda(numero)
         except WebDriverException as e:

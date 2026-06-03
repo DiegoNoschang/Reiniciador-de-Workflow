@@ -1,5 +1,5 @@
 """
-Interface PyQt6 — Reiniciador de Workflow iiLex (Ramos Advogados).
+Interface PyQt6 — Reiniciador de Workflow - iiLex (RPA) (Ramos Advogados).
 
 Recursos:
     - Login com lembrar (DPAPI no Windows quando disponível)
@@ -247,6 +247,7 @@ class Worker(QObject):
             tipo_compromisso_alvo=self.params.settings.tipo_compromisso_alvo,
             excluir_workflow=self.params.settings.excluir_workflow,
             relogin_minutos=self.params.settings.relogin_minutos,
+            max_retentativas_erro=self.params.settings.max_retentativas_erro,
         )
         callbacks = CallbacksAutomacao(
             on_log=lambda lvl, m: self.log_message.emit(lvl, m),
@@ -934,7 +935,7 @@ class JanelaPrincipal(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Reiniciador de Workflow iiLex — Ramos Advogados")
+        self.setWindowTitle("Reiniciador de Workflow - iiLex (RPA) — Ramos Advogados")
         self.resize(780, 700)
         self.setMinimumSize(680, 560)
 
@@ -1234,7 +1235,7 @@ class JanelaPrincipal(QMainWindow):
         titulos.setContentsMargins(0, 0, 0, 0)
         titulos.setSpacing(2)
         titulos.addStretch()
-        titulo = QLabel("Reiniciador de Workflow iiLex")
+        titulo = QLabel("Reiniciador de Workflow - iiLex (RPA)")
         titulo.setObjectName("tituloHeader")
         subtitulo = QLabel("Ramos Advogados")
         subtitulo.setObjectName("subtituloHeader")
@@ -1298,7 +1299,7 @@ class JanelaPrincipal(QMainWindow):
         versao_box.setContentsMargins(0, 0, 0, 0)
         versao_box.setSpacing(0)
         versao_box.setAlignment(Qt.AlignmentFlag.AlignRight)
-        nome_app = QLabel("Reiniciador de Workflow iiLex")
+        nome_app = QLabel("Reiniciador de Workflow - iiLex (RPA)")
         nome_app.setObjectName("footerEmpresa")
         nome_app.setAlignment(Qt.AlignmentFlag.AlignRight)
         versao_txt = QLabel(f"v{VERSAO_APP}  •  © {ANO_APP}")
@@ -1319,7 +1320,7 @@ class JanelaPrincipal(QMainWindow):
         else:
             icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         self.tray = QSystemTrayIcon(icon, self)
-        self.tray.setToolTip("Reiniciador de Workflow iiLex")
+        self.tray.setToolTip("Reiniciador de Workflow - iiLex (RPA)")
         self.tray.show()
 
     # ---------------------------------------------------------
@@ -1478,6 +1479,7 @@ class JanelaPrincipal(QMainWindow):
 
         # Checkpoint — pergunta se quer retomar
         retomar_de = 0
+        cp_retomar = None   # checkpoint a restaurar (se o usuário aceitar retomar)
         if self.settings.retomar_automatico:
             cp = checkpoint.carregar()
             if checkpoint.pode_retomar(cp, processos, self.arquivo_excel or ""):
@@ -1493,12 +1495,23 @@ class JanelaPrincipal(QMainWindow):
                 )
                 if resp == QMessageBox.StandardButton.Yes:
                     retomar_de = cp.proximo_indice
+                    cp_retomar = cp
                 else:
                     checkpoint.apagar()
 
-        # Reset de estado
+        # Reset de estado — ao RETOMAR, restaura os resultados/contadores já
+        # feitos (pra não zerar os números nem perder os que deram erro).
+        if cp_retomar and getattr(cp_retomar, "resultados", None):
+            self.resultados_atuais = [
+                self._dict_para_resultado(d) for d in cp_retomar.resultados]
+            self._log("INFO",
+                f"Retomando: {len(self.resultados_atuais)} resultado(s) "
+                "anterior(es) restaurado(s) — contadores e relatório continuam.")
+        else:
+            self.resultados_atuais = []
         self.contadores = {s: 0 for s in StatusProcesso}
-        self.resultados_atuais = []
+        for r in self.resultados_atuais:
+            self.contadores[r.status] = self.contadores.get(r.status, 0) + 1
         self.indice_corrente = retomar_de
         self._path_relatorio = None
         self.btn_relatorio.setVisible(False)
@@ -1565,6 +1578,9 @@ class JanelaPrincipal(QMainWindow):
 
     @pyqtSlot(list)
     def _on_finished(self, resultados: list):
+        # Usa a lista ACUMULADA da UI (inclui resultados restaurados de um
+        # checkpoint anterior), não só o que o worker rodou nesta sessão.
+        resultados = self.resultados_atuais or resultados
         self.timer_elapsed.stop()
         self.btn_iniciar.setEnabled(True)
         self.btn_parar.setEnabled(False)
@@ -1621,16 +1637,19 @@ class JanelaPrincipal(QMainWindow):
                 hash_processos=checkpoint.calcular_hash(self.processos_carregados),
                 total=total,
                 proximo_indice=self.indice_corrente,
+                resultados=[self._resultado_para_dict(r)
+                            for r in self.resultados_atuais],
             )
             checkpoint.salvar(cp)
             self._log("WARNING",
-                f"Checkpoint salvo no índice {self.indice_corrente}/{total}.")
+                f"Checkpoint salvo no índice {self.indice_corrente}/{total} "
+                f"({len(self.resultados_atuais)} resultado(s) guardado(s)).")
 
         # Notificação
         if self.settings.notificar_ao_terminar and self.tray:
             resumo = self._resumo_contagem()
             self.tray.showMessage(
-                "Reiniciador de Workflow iiLex concluído",
+                "Reiniciador de Workflow - iiLex (RPA) concluído",
                 f"{resumo}" + (f"\nRelatório: {Path(path_relat).name}" if path_relat else ""),
                 QSystemTrayIcon.MessageIcon.Information,
                 5000,
@@ -1651,13 +1670,16 @@ class JanelaPrincipal(QMainWindow):
         self.progresso.setValue(atual)
         self.progresso.setFormat(f"{atual}/{total} processos")
 
-        # Salva checkpoint a cada processo
+        # Salva checkpoint a cada processo (com os resultados, p/ restaurar
+        # contadores e relatório se a ferramenta fechar/cair).
         if atual > 0 and self.arquivo_excel:
             cp = checkpoint.Checkpoint(
                 arquivo_excel=self.arquivo_excel,
                 hash_processos=checkpoint.calcular_hash(self.processos_carregados),
                 total=len(self.processos_carregados),
                 proximo_indice=atual,
+                resultados=[self._resultado_para_dict(r)
+                            for r in self.resultados_atuais],
             )
             checkpoint.salvar(cp)
 
@@ -1666,6 +1688,23 @@ class JanelaPrincipal(QMainWindow):
         self.resultados_atuais.append(resultado)
         self.contadores[resultado.status] = self.contadores.get(resultado.status, 0) + 1
         self.lbl_contadores.setText(self._formatar_contadores())
+
+    @staticmethod
+    def _resultado_para_dict(r: ResultadoProcesso) -> dict:
+        """Serializa um ResultadoProcesso p/ salvar no checkpoint (JSON)."""
+        return {"numero": r.numero, "status": r.status.name,
+                "mensagem": r.mensagem, "timestamp": getattr(r, "timestamp", "")}
+
+    @staticmethod
+    def _dict_para_resultado(d: dict) -> ResultadoProcesso:
+        """Reconstrói um ResultadoProcesso a partir do dict do checkpoint."""
+        try:
+            st = StatusProcesso[d.get("status", "")]
+        except KeyError:
+            st = StatusProcesso.ERRO
+        return ResultadoProcesso(
+            numero=d.get("numero", ""), status=st,
+            mensagem=d.get("mensagem", ""), timestamp=d.get("timestamp", ""))
 
     @pyqtSlot(str, str)
     def _append_log(self, level: str, message: str):
@@ -1798,7 +1837,7 @@ class JanelaPrincipal(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
-    app.setApplicationName("Reiniciador de Workflow iiLex")
+    app.setApplicationName("Reiniciador de Workflow - iiLex (RPA)")
     app.setOrganizationName("Ramos Advogados")
 
     # Ícone da aplicação (aparece também na taskbar do Windows)

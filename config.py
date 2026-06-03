@@ -323,8 +323,8 @@ class Settings:
     headless: bool = False
 
     # URLs (caso o iiLex mude o domínio futuramente)
-    url_login: str = "https://ramosadv.iilex.com.br/sistema/login/semacesso"
-    url_contencioso: str = "https://ramosadv.iilex.com.br/sistema/contencioso/filtro"
+    url_login: str = "https://SEU-ESCRITORIO.iilex.com.br/sistema/login/semacesso"
+    url_contencioso: str = "https://SEU-ESCRITORIO.iilex.com.br/sistema/contencioso/filtro"
 
     # Excel
     coluna_excel: int = 1          # 1 = coluna A, 2 = B, ...
@@ -345,6 +345,7 @@ class Settings:
     pausa_entre_processos: float = 2.0
     retomar_automatico: bool = True   # perguntar se quer retomar checkpoint
     relogin_minutos: int = 30   # re-login proativo a cada N min (0 = desliga)
+    max_retentativas_erro: int = 2   # re-tenta processo que deu erro (agenda não carregou etc.)
 
     # Persistência
     salvar_log_em_arquivo: bool = True

@@ -1,0 +1,42 @@
+flowchart TD
+    A([Iniciar]) --> B[Login no iiLex]
+    B --> C{Login OK?}
+    C -->|Nao| ZF([Fim: erro de login])
+    C -->|Sim| D[Ler planilha Excel<br/>auto-detecta a coluna<br/>Numero do Processo]
+    D --> LOOP[/Proximo processo da lista/]
+    LOOP --> RL{Passaram 30 min<br/>desde o login?}
+    RL -->|Sim| RLX[Re-login automatico]
+    RL -->|Nao| OPEN[Abrir tela de Contencioso]
+    RLX --> OPEN
+    OPEN --> SITE{iiLex no ar?}
+    SITE -->|Nao, o site caiu| WAIT[Aguardar e tentar<br/>ate o site voltar]
+    WAIT --> SITE
+    SITE -->|Sim| SESS{Sessao expirou?}
+    SESS -->|Sim| RLX
+    SESS -->|Nao| SEARCH[Pesquisar o numero]
+    SEARCH --> EXACT[Abrir o processo de numero EXATO]
+    EXACT --> FOUND{Encontrou?}
+    FOUND -->|Nao| O_NF[NAO ENCONTRADO]:::rev
+    FOUND -->|Sim| AG[Abrir Agenda e expandir a secao]
+    AG --> MATCH[Achar 'Solicitacao de Subsidios'<br/>match EXATO]
+    MATCH --> DEC{Situacao do<br/>compromisso}
+    DEC -->|Nenhum do tipo| O_SC[SEM COMPROMISSO]:::rev
+    DEC -->|2 ou mais| O_MU[MULTIPLOS - avisa e pula]:::rev
+    DEC -->|Ja concluido| O_JC[JA CONCLUIDO]:::rev
+    DEC -->|1 pendente| ENTER[Entrar no compromisso]
+    ENTER --> BOLD{Em negrito?<br/>= nao finalizado}
+    BOLD -->|Nao| O_EN[ENTROU - nao mexe no WF]:::ok
+    BOLD -->|Sim| DEL[Excluir WorkFlow<br/>botao cinza, NUNCA o vermelho]
+    DEL --> NEW[Iniciar novo WorkFlow]
+    NEW --> O_WR[WORKFLOW REINICIADO]:::ok
+    O_NF --> MORE
+    O_SC --> MORE
+    O_MU --> MORE
+    O_JC --> MORE
+    O_EN --> MORE
+    O_WR --> MORE
+    MORE{Tem mais<br/>processos?} -->|Sim| LOOP
+    MORE -->|Nao| REP[Gerar relatorios:<br/>Completo + Concluidos + Revisar]
+    REP --> END([Fim])
+    classDef ok fill:#C6EFCE,stroke:#2E7D32,color:#1B5E20;
+    classDef rev fill:#FFEB9C,stroke:#B7791F,color:#7A5C00;

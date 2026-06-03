@@ -1,13 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec — gera um .exe único do Reiniciador de Workflow iiLex.
+PyInstaller spec — gera um .exe único do Reiniciador de Workflow - iiLex (RPA).
 
 Como usar:
     pip install pyinstaller
     pyinstaller iilex.spec
 
 O executável final fica em:
-    dist/Reiniciador de Workflow iiLex.exe
+    dist/Reiniciador de Workflow - iiLex (RPA).exe
 """
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -87,7 +87,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='Reiniciador de Workflow iiLex',
+    name='Reiniciador de Workflow - iiLex (RPA)',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
