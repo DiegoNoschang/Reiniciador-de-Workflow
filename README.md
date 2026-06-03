@@ -7,12 +7,12 @@
 ![Portfolio](https://img.shields.io/badge/projeto-portf%C3%B3lio-blueviolet)
 
 Aplicação **desktop de automação de processos (RPA)** que gerencia *workflows* no
-sistema jurídico **iiLex**, substituindo um fluxo manual e repetitivo — abrir
-processo por processo, ler a agenda, excluir e reiniciar o workflow — por uma
+sistema jurídico **iiLex**, substituindo um fluxo manual e repetitivo abrir
+processo por processo, ler a agenda, excluir e reiniciar o workflow por uma
 execução **automática, auditável e retomável** a partir de uma planilha Excel.
 
 > ⚙️ **Nota de portfólio:** projeto desenvolvido em contexto profissional e
-> **generalizado para fins de portfólio** — identificadores e dados da empresa
+> **generalizado para fins de portfólio** identificadores e dados da empresa
 > foram removidos. As URLs de acesso ao iiLex são **configuráveis** (veja
 > [Configuração](#%EF%B8%8F-configuração)).
 
@@ -115,19 +115,19 @@ url_contencioso: "https://SEU-DOMINIO.iilex.com.br/sistema/contencioso/filtro"
 
 Alguns problemas reais resolvidos no projeto:
 
-- **Tabela carregada via AJAX (`data-async`)** — a seção "Agenda" é um submódulo
+- **Tabela carregada via AJAX (`data-async`)** a seção "Agenda" é um submódulo
   Bootstrap que renderiza com atraso e popula as linhas via AJAX **somente após
   ser expandida**. A primeira versão lia a tabela cedo demais e encontrava
   "0 linhas". A solução espera o cabeçalho renderizar, expande o painel correto
   e **aguarda o `<tbody>` popular** (usando o contador de itens do próprio
   cabeçalho) antes de ler.
-- **Ação destrutiva com salvaguardas em camadas** — antes de excluir um
+- **Ação destrutiva com salvaguardas em camadas** antes de excluir um
   workflow, o sistema exige que o compromisso esteja sinalizado como pendente,
   valida o **elemento exato** do botão (rejeitando botões parecidos que
   excluiriam o registro inteiro) e só então **confirma** no modal.
-- **UI responsiva** — a automação roda em uma `QThread` separada, com `stop`/
+- **UI responsiva** a automação roda em uma `QThread` separada, com `stop`/
   `pause` cooperativos, mantendo a interface fluida e cancelável.
-- **Resiliência** — re-login automático em caso de sessão expirada, e
+- **Resiliência** re-login automático em caso de sessão expirada, e
   *checkpoint* para retomar lotes longos interrompidos.
 
 ## 📁 Estrutura
@@ -147,7 +147,7 @@ exclusor-workflow-iilex/
 
 ## 👤 Autor
 
-**Diego Fernandes Noschang** — Estudante de Análise e Desenvolvimento de
+**Diego Fernandes Noschang** / Estudante de Análise e Desenvolvimento de
 Sistemas, com foco em automação de processos (RPA) e Python.
 
 - 💻 GitHub: [@DiegoNoschang](https://github.com/DiegoNoschang)
